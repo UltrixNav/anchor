@@ -6,62 +6,14 @@
 #include <DW1000NgUtils.hpp>
 
 #include "tdoa3_anchor.hpp"
+#include "tdoa3_config.hpp"
 
 namespace {
-constexpr uint8_t kPinDwCs = 7;   // TODO: update to your wiring
-constexpr uint8_t kPinDwIrq = 2;  // TODO: update to your wiring
-constexpr uint8_t kPinDwRst = 3;  // TODO: update to your wiring
-
-constexpr bool kEnableDebug = true;
-constexpr uint32_t kDebugIntervalMs = 1000;
-
 #ifndef LED_BUILTIN
-constexpr uint8_t kBuiltInLedPin = 8;  // XIAO ESP32C3 default user LED
+constexpr uint8_t kBuiltInLedPin = tdoa3_config::kBuiltInLedFallbackPin;  // XIAO ESP32C3 default user LED
 #else
 constexpr uint8_t kBuiltInLedPin = LED_BUILTIN;
 #endif
-
-constexpr uint16_t kNetworkId = 0xBEEF;
-constexpr uint8_t kAnchorId = 0x02;
-constexpr uint16_t kAntennaDelayTicks = 16416;
-
-constexpr bool kEnableFrameCheck = true;  // set true if all frames use valid CRC
-constexpr bool kLowBitrateMode = false;    // match the tag's bitrate settings
-
-constexpr uint16_t kRxFrameWaitTimeoutUs = 0;  // 0 disables timeout (max RX window)
-constexpr uint16_t kSfdTimeoutSymbols = 4096 + 64 + 1;  // preamble + SFD + margin
-
-constexpr bool kUseRxPollingFallback = true;
-constexpr bool kLogEveryTx = false;
-constexpr bool kUseRxInterrupts = false;
-constexpr bool kLogEveryRx = false;
-
-constexpr uint32_t kDelayedTxMarginUs = 2000;  // minimum lead time for delayed TX
-
-constexpr size_t kMaxFrameSize = 127;
-
-device_configuration_t kRadioConfig = {
-    .extendedFrameLength = false,
-    .receiverAutoReenable = true,
-    .smartPower = true,
-    .frameCheck = kEnableFrameCheck,
-    .nlos = false,
-    .sfd = SFDMode::STANDARD_SFD,
-    .channel = Channel::CHANNEL_5,
-    .dataRate = kLowBitrateMode ? DataRate::RATE_110KBPS : DataRate::RATE_850KBPS,
-    .pulseFreq = PulseFrequency::FREQ_16MHZ,
-    .preambleLen = PreambleLength::LEN_256,
-    .preaCode = PreambleCode::CODE_3,
-};
-
-interrupt_configuration_t kInterruptConfig = {
-    .interruptOnSent = true,
-    .interruptOnReceived = kUseRxInterrupts,
-    .interruptOnReceiveFailed = false,
-    .interruptOnReceiveTimeout = false,
-    .interruptOnReceiveTimestampAvailable = false,
-    .interruptOnAutomaticAcknowledgeTrigger = false,
-};
 
 volatile bool gRxDone = false;
 volatile bool gTxDone = false;
@@ -74,8 +26,8 @@ uint32_t gLastDebugMs = 0;
 uint64_t gLastSysTs = 0;
 
 tdoa3::Anchor gAnchor;
-uint8_t gRxBuffer[kMaxFrameSize] = {};
-uint8_t gTxBuffer[kMaxFrameSize] = {};
+uint8_t gRxBuffer[tdoa3_config::kMaxFrameSize] = {};
+uint8_t gTxBuffer[tdoa3_config::kMaxFrameSize] = {};
 
 uint64_t alignDelayedTime(uint64_t time) {
   return (time & ~((1ULL << 9) - 1)) + (1ULL << 9);
@@ -106,10 +58,10 @@ void startReceive() {
 }
 
 void logRxFrame(const uint8_t* data, uint16_t len, uint64_t rxTimestamp) {
-  if (!kEnableDebug) {
+  if (!tdoa3_config::kEnableDebug) {
     return;
   }
-  if (!kLogEveryRx) {
+  if (!tdoa3_config::kLogEveryRx) {
     return;
   }
 
@@ -137,10 +89,10 @@ void logRxFrame(const uint8_t* data, uint16_t len, uint64_t rxTimestamp) {
 }
 
 void logTxFrame(size_t len, uint64_t txTimestamp) {
-  if (!kEnableDebug) {
+  if (!tdoa3_config::kEnableDebug) {
     return;
   }
-  if (!kLogEveryTx) {
+  if (!tdoa3_config::kLogEveryTx) {
     return;
   }
   Serial.printf("TX len=%u seq=%u txTs=%llu\n",
@@ -150,7 +102,7 @@ void logTxFrame(size_t len, uint64_t txTimestamp) {
 }
 
 void logError(const char* label) {
-  if (!kEnableDebug) {
+  if (!tdoa3_config::kEnableDebug) {
     return;
   }
   Serial.printf("RADIO %s\n", label);
@@ -165,50 +117,50 @@ void setup() {
   pinMode(kBuiltInLedPin, OUTPUT);
   digitalWrite(kBuiltInLedPin, HIGH);  // XIAO ESP32C3 LED is active-low
 
-  pinMode(kPinDwIrq, INPUT);
+  pinMode(tdoa3_config::kPinDwIrq, INPUT);
 
   SPI.begin(4, 5, 6, 7);
 
-  DW1000Ng::initialize(kPinDwCs, kPinDwIrq, kPinDwRst);
-  DW1000Ng::applyConfiguration(kRadioConfig);
-  DW1000Ng::applyInterruptConfiguration(kInterruptConfig);
+  DW1000Ng::initialize(tdoa3_config::kPinDwCs, tdoa3_config::kPinDwIrq, tdoa3_config::kPinDwRst);
+  DW1000Ng::applyConfiguration(tdoa3_config::kRadioConfig);
+  DW1000Ng::applyInterruptConfiguration(tdoa3_config::kInterruptConfig);
 
   DW1000Ng::setNetworkId(48879U);
-  DW1000Ng::setDeviceAddress(kAnchorId);
+  DW1000Ng::setDeviceAddress(tdoa3_config::kAnchorId);
 
-  byte eui[8] = {0xDE, 0xCA, 0xF0, 0x00, 0x00, 0x00, 0x00, kAnchorId};
+  byte eui[8] = {0xDE, 0xCA, 0xF0, 0x00, 0x00, 0x00, 0x00, tdoa3_config::kAnchorId};
   DW1000Ng::setEUI(eui);
-  DW1000Ng::setAntennaDelay(kAntennaDelayTicks);
+  DW1000Ng::setAntennaDelay(tdoa3_config::kAntennaDelayTicks);
   // DW1000Ng::setReceiveFrameWaitTimeoutPeriod(kRxFrameWaitTimeoutUs);
   // DW1000Ng::setSfdDetectionTimeout(kSfdTimeoutSymbols);
 
-  if (kEnableDebug) {
+  if (tdoa3_config::kEnableDebug) {
     Serial.printf("RADIO cfg: ch=%u rate=%u preamble=%u code=%u frameCheck=%u\n",
-                  static_cast<unsigned>(kRadioConfig.channel),
-                  static_cast<unsigned>(kRadioConfig.dataRate),
-                  static_cast<unsigned>(kRadioConfig.preambleLen),
-                  static_cast<unsigned>(kRadioConfig.preaCode),
-                  static_cast<unsigned>(kRadioConfig.frameCheck));
+                  static_cast<unsigned>(tdoa3_config::kRadioConfig.channel),
+                  static_cast<unsigned>(tdoa3_config::kRadioConfig.dataRate),
+                  static_cast<unsigned>(tdoa3_config::kRadioConfig.preambleLen),
+                  static_cast<unsigned>(tdoa3_config::kRadioConfig.preaCode),
+                  static_cast<unsigned>(tdoa3_config::kRadioConfig.frameCheck));
     Serial.printf("RADIO rxTimeoutUs=%u sfdTimeout=%u\n",
-                  static_cast<unsigned>(kRxFrameWaitTimeoutUs),
-                  static_cast<unsigned>(kSfdTimeoutSymbols));
+                  static_cast<unsigned>(tdoa3_config::kRxFrameWaitTimeoutUs),
+                  static_cast<unsigned>(tdoa3_config::kSfdTimeoutSymbols));
   }
 
   DW1000Ng::attachSentHandler(handleSent);
-  if (kUseRxInterrupts) {
+  if (tdoa3_config::kUseRxInterrupts) {
     DW1000Ng::attachReceivedHandler(handleReceived);
     DW1000Ng::attachReceiveFailedHandler(handleReceiveFailed);
     DW1000Ng::attachReceiveTimeoutHandler(handleReceiveTimeout);
   }
 
   tdoa3::Config config;
-  config.anchorId = kAnchorId;
-  config.antennaDelayTicks = kAntennaDelayTicks;
-  config.lowBitrate = kLowBitrateMode;
-  config.positionEnabled = true;
-  config.position[0] = 0.0f;
-  config.position[1] = 0.0f;
-  config.position[2] = 0.0f;
+  config.anchorId = tdoa3_config::kAnchorId;
+  config.antennaDelayTicks = tdoa3_config::kAntennaDelayTicks;
+  config.lowBitrate = tdoa3_config::kLowBitrateMode;
+  config.positionEnabled = tdoa3_config::kPositionEnabled;
+  config.position[0] = tdoa3_config::kPositionX;
+  config.position[1] = tdoa3_config::kPositionY;
+  config.position[2] = tdoa3_config::kPositionZ;
   gAnchor.begin(config);
   gAnchor.scheduleNextTx(millis());
 
@@ -219,7 +171,7 @@ void loop() {
   const uint32_t nowMs = millis();
   gAnchor.tick(nowMs);
 
-  if ((kUseRxPollingFallback || !kUseRxInterrupts) && DW1000Ng::isReceiveDone()) {
+  if ((tdoa3_config::kUseRxPollingFallback || !tdoa3_config::kUseRxInterrupts) && DW1000Ng::isReceiveDone()) {
     gRxDone = true;
   }
 
@@ -228,7 +180,7 @@ void loop() {
     DW1000Ng::clearReceiveStatus();
 
     uint16_t len = DW1000Ng::getReceivedDataLength();
-    if (len > 0 && len <= kMaxFrameSize) {
+    if (len > 0 && len <= tdoa3_config::kMaxFrameSize) {
       DW1000Ng::getReceivedData(gRxBuffer, len);
       uint64_t rxTimestamp = DW1000Ng::getReceiveTimestamp();
       logRxFrame(gRxBuffer, len, rxTimestamp);
@@ -253,7 +205,7 @@ void loop() {
 
   if (gAnchor.shouldTransmit(nowMs)) {
     uint64_t nowUwb = DW1000Ng::getSystemTimestamp();
-    uint64_t txTime = nowUwb + delayUsToTicks(kDelayedTxMarginUs);
+    uint64_t txTime = nowUwb + delayUsToTicks(tdoa3_config::kDelayedTxMarginUs);
     txTime = alignDelayedTime(txTime);
 
     gAnchor.markTransmit(static_cast<uint32_t>(txTime));
@@ -276,7 +228,7 @@ void loop() {
     gAnchor.scheduleNextTx(nowMs);
   }
 
-  if (kEnableDebug && (nowMs - gLastDebugMs) >= kDebugIntervalMs) {
+  if (tdoa3_config::kEnableDebug && (nowMs - gLastDebugMs) >= tdoa3_config::kDebugIntervalMs) {
     uint64_t sysTs = DW1000Ng::getSystemTimestamp();
     Serial.printf("DBG ms=%lu sysTs=%llu rx=%lu tx=%lu err=%lu\n",
                   static_cast<unsigned long>(nowMs),
@@ -285,7 +237,7 @@ void loop() {
                   static_cast<unsigned long>(gTxCount),
                   static_cast<unsigned long>(gErrCount));
     Serial.printf("DBG irq=%u rxDone=%u rxFail=%u\n",
-                  static_cast<unsigned>(digitalRead(kPinDwIrq)),
+                  static_cast<unsigned>(digitalRead(tdoa3_config::kPinDwIrq)),
                   static_cast<unsigned>(DW1000Ng::isReceiveDone()),
                   static_cast<unsigned>(DW1000Ng::isReceiveFailed()));
     if (sysTs == gLastSysTs) {

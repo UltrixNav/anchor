@@ -1,25 +1,26 @@
 #include "tdoa3_anchor.hpp"
 
+#include "tdoa3_anchor_config.hpp"
+
 #include <DW1000NgConstants.hpp>
 
 namespace tdoa3 {
 
 namespace {
-constexpr float kAnchorMaxTxFreq = 50.0f;
-constexpr float kAnchorMinTxFreq = 20.0f;
-constexpr uint32_t kDelayRandomIntervalMs = 10;
-constexpr uint32_t kAnchorListUpdateMs = 1000;
-constexpr uint32_t kDistanceValidityMs = 2000;
-constexpr double kMaxClockDeviation = 100e-6;
-constexpr double kClockCorrectionSpecMin = 1.0 - kMaxClockDeviation * 2;
-constexpr double kClockCorrectionSpecMax = 1.0 + kMaxClockDeviation * 2;
-constexpr double kClockCorrectionAcceptedNoise = 0.3e-6;
-constexpr double kClockCorrectionFilter = 0.1;
-constexpr uint8_t kClockCorrectionBucketMax = 8;
-constexpr bool kAnchorDebug = true;
-constexpr bool kAutoCreateContextOnRx = true;
-constexpr uint32_t kAnchorDebugIntervalMs = 1000;
-constexpr uint32_t kTxListDebugIntervalMs = 1000;
+constexpr float kAnchorMaxTxFreq = tdoa3_anchor_config::kAnchorMaxTxFreqHz;
+constexpr float kAnchorMinTxFreq = tdoa3_anchor_config::kAnchorMinTxFreqHz;
+constexpr uint32_t kDelayRandomIntervalMs = tdoa3_anchor_config::kDelayRandomIntervalMs;
+constexpr uint32_t kAnchorListUpdateMs = tdoa3_anchor_config::kAnchorListUpdateMs;
+constexpr uint32_t kDistanceValidityMs = tdoa3_anchor_config::kDistanceValidityMs;
+constexpr double kClockCorrectionSpecMin = tdoa3_anchor_config::kClockCorrectionSpecMin;
+constexpr double kClockCorrectionSpecMax = tdoa3_anchor_config::kClockCorrectionSpecMax;
+constexpr double kClockCorrectionAcceptedNoise = tdoa3_anchor_config::kClockCorrectionAcceptedNoise;
+constexpr double kClockCorrectionFilter = tdoa3_anchor_config::kClockCorrectionFilter;
+constexpr uint8_t kClockCorrectionBucketMax = tdoa3_anchor_config::kClockCorrectionBucketMax;
+constexpr bool kAnchorDebug = tdoa3_anchor_config::kAnchorDebug;
+constexpr bool kAutoCreateContextOnRx = tdoa3_anchor_config::kAutoCreateContextOnRx;
+constexpr uint32_t kAnchorDebugIntervalMs = tdoa3_anchor_config::kAnchorDebugIntervalMs;
+constexpr uint32_t kTxListDebugIntervalMs = tdoa3_anchor_config::kTxListDebugIntervalMs;
 }  // namespace
 
 void Anchor::begin(const Config& config) {
