@@ -15,9 +15,12 @@ constexpr uint8_t kBuiltInLedPin = tdoa3_config::kBuiltInLedFallbackPin;  // XIA
 constexpr uint8_t kBuiltInLedPin = LED_BUILTIN;
 #endif
 
+const uint8_t kBlueLedPin = 8;  // Blue LED indicator
+
 volatile bool gRxDone = false;
 volatile bool gTxDone = false;
 volatile bool gRxError = false;
+volatile bool gLedActivityNeeded = false;
 
 uint32_t gRxCount = 0;
 uint32_t gTxCount = 0;
@@ -65,23 +68,26 @@ void logRxFrame(const uint8_t* data, uint16_t len, uint64_t rxTimestamp) {
     return;
   }
 
-  if (len < sizeof(tdoa3::AppHeader)) {
+  if (len < sizeof(tdoa3::MAC80215Header)) {
     Serial.printf("RX len=%u ts=%llu\n", len, static_cast<unsigned long long>(rxTimestamp));
     return;
   }
 
-  auto appHeader = reinterpret_cast<const tdoa3::AppHeader*>(data);
-  Serial.printf("RX src=%u dst=%u type=0x%02X len=%u ts=%llu\n",
-                appHeader->sourceId,
-                appHeader->destId,
-                appHeader->type,
+  auto macHeader = reinterpret_cast<const tdoa3::MAC80215Header*>(data);
+  Serial.printf("RX src=%u dst=%u len=%u ts=%llu\n",
+                macHeader->srcAddr[0],
+                macHeader->destAddr[0],
                 len,
                 static_cast<unsigned long long>(rxTimestamp));
 
-  if (len >= sizeof(tdoa3::AppHeader) + sizeof(tdoa3::RangeHeader)) {
-    auto rangeHeader = reinterpret_cast<const tdoa3::RangeHeader*>(
-        data + sizeof(tdoa3::AppHeader));
-    Serial.printf("  range seq=%u remoteCount=%u txTs=%lu\n",
+  // Payload starts after MAC header (21 bytes)
+  const uint8_t* payload = data + sizeof(tdoa3::MAC80215Header);
+  size_t payloadLen = len - sizeof(tdoa3::MAC80215Header);
+  
+  if (payloadLen >= sizeof(tdoa3::RangeHeader)) {
+    auto rangeHeader = reinterpret_cast<const tdoa3::RangeHeader*>(payload);
+    Serial.printf("  range type=0x%02X seq=%u remoteCount=%u txTs=%lu\n",
+                  rangeHeader->type,
                   rangeHeader->seq,
                   rangeHeader->remoteCount,
                   static_cast<unsigned long>(rangeHeader->txTimeStamp));
@@ -108,6 +114,29 @@ void logError(const char* label) {
   Serial.printf("RADIO %s\n", label);
 }
 
+void updateBlueLed() {
+  // LED status (inverted: LOW = ON, HIGH = OFF):
+  // OFF if no valid anchors
+  // BLINKING when RX/TX happening and valid anchors present
+  uint8_t validAnchorCount = gAnchor.validAnchorCount();
+  
+  if (validAnchorCount == 0) {
+    // No valid anchors - LED off
+    digitalWrite(kBlueLedPin, HIGH);
+  } else {
+    // Valid anchors present - blink on RX/TX activity
+    uint32_t nowMs = millis();
+    if (gLedActivityNeeded) {
+      // Blink for activity; pulse for ~50ms
+      digitalWrite(kBlueLedPin, LOW);
+      gLedActivityNeeded = false;
+    } else {
+      // Fade out over time
+      digitalWrite(kBlueLedPin, HIGH);
+    }
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -116,6 +145,9 @@ void setup() {
 
   pinMode(kBuiltInLedPin, OUTPUT);
   digitalWrite(kBuiltInLedPin, HIGH);  // XIAO ESP32C3 LED is active-low
+  
+  pinMode(kBlueLedPin, OUTPUT);
+  digitalWrite(kBlueLedPin, HIGH);  // Blue LED off initially (inverted)
 
   pinMode(tdoa3_config::kPinDwIrq, INPUT);
 
@@ -131,6 +163,9 @@ void setup() {
   byte eui[8] = {0xDE, 0xCA, 0xF0, 0x00, 0x00, 0x00, 0x00, tdoa3_config::kAnchorId};
   DW1000Ng::setEUI(eui);
   DW1000Ng::setAntennaDelay(tdoa3_config::kAntennaDelayTicks);
+  if (tdoa3_config::forceTxPower) {
+    DW1000Ng::setTXPower(0x1F1F1F1Ful);
+  }
   // DW1000Ng::setReceiveFrameWaitTimeoutPeriod(kRxFrameWaitTimeoutUs);
   // DW1000Ng::setSfdDetectionTimeout(kSfdTimeoutSymbols);
 
@@ -178,13 +213,24 @@ void loop() {
   if (gRxDone) {
     gRxDone = false;
     DW1000Ng::clearReceiveStatus();
+    gLedActivityNeeded = true;  // Trigger LED blink on RX
 
     uint16_t len = DW1000Ng::getReceivedDataLength();
     if (len > 0 && len <= tdoa3_config::kMaxFrameSize) {
       DW1000Ng::getReceivedData(gRxBuffer, len);
       uint64_t rxTimestamp = DW1000Ng::getReceiveTimestamp();
       logRxFrame(gRxBuffer, len, rxTimestamp);
-      gAnchor.onReceive(gRxBuffer, len, static_cast<uint32_t>(rxTimestamp));
+      
+      // Extract source ID from MAC header and pass to algorithm
+      if (len >= sizeof(tdoa3::MAC80215Header)) {
+        auto macHeader = reinterpret_cast<const tdoa3::MAC80215Header*>(gRxBuffer);
+        uint8_t sourceId = macHeader->srcAddr[0];
+        
+        // Pass only the payload (after MAC header) to TDOA3 algorithm
+        const uint8_t* payload = gRxBuffer + sizeof(tdoa3::MAC80215Header);
+        size_t payloadLen = len - sizeof(tdoa3::MAC80215Header);
+        gAnchor.onReceive(sourceId, payload, payloadLen, static_cast<uint32_t>(rxTimestamp));
+      }
       gRxCount++;
     }
   }
@@ -208,7 +254,7 @@ void loop() {
     uint64_t txTime = nowUwb + delayUsToTicks(tdoa3_config::kDelayedTxMarginUs);
     txTime = alignDelayedTime(txTime);
 
-    gAnchor.markTransmit(static_cast<uint32_t>(txTime));
+    gAnchor.markTransmit(static_cast<uint32_t>(txTime), 0);  // MAC seq will be incremented internally
     size_t txLen = gAnchor.buildTxFrame(gTxBuffer, sizeof(gTxBuffer));
 
     if (txLen > 0) {
@@ -222,6 +268,7 @@ void loop() {
       DW1000Ng::setTransmitData(gTxBuffer, static_cast<uint16_t>(txLen));
       DW1000Ng::startTransmit(TransmitMode::DELAYED);
       logTxFrame(txLen, txTime);
+      gLedActivityNeeded = true;  // Trigger LED blink on TX
       gTxCount++;
     }
 
@@ -230,12 +277,13 @@ void loop() {
 
   if (tdoa3_config::kEnableDebug && (nowMs - gLastDebugMs) >= tdoa3_config::kDebugIntervalMs) {
     uint64_t sysTs = DW1000Ng::getSystemTimestamp();
-    Serial.printf("DBG ms=%lu sysTs=%llu rx=%lu tx=%lu err=%lu\n",
+    Serial.printf("DBG ms=%lu sysTs=%llu rx=%lu tx=%lu err=%lu validAnchors=%u\n",
                   static_cast<unsigned long>(nowMs),
                   static_cast<unsigned long long>(sysTs),
                   static_cast<unsigned long>(gRxCount),
                   static_cast<unsigned long>(gTxCount),
-                  static_cast<unsigned long>(gErrCount));
+                  static_cast<unsigned long>(gErrCount),
+                  static_cast<unsigned>(gAnchor.validAnchorCount()));
     Serial.printf("DBG irq=%u rxDone=%u rxFail=%u\n",
                   static_cast<unsigned>(digitalRead(tdoa3_config::kPinDwIrq)),
                   static_cast<unsigned>(DW1000Ng::isReceiveDone()),
@@ -247,5 +295,6 @@ void loop() {
     gLastDebugMs = nowMs;
   }
 
+  updateBlueLed();
   delay(1);
 }

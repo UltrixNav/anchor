@@ -36,6 +36,7 @@ void Anchor::begin(const Config& config) {
   averageTxDelayMs_ = static_cast<uint32_t>(1000.0f / kAnchorMinTxFreq);
   remoteTxIdCount_ = 0;
   nextAnchorListUpdateMs_ = 0;
+  macSeqNr_ = 0;
 
   memset(anchorCtxLookup_, kIdWithoutContext, sizeof(anchorCtxLookup_));
   for (auto& ctx : anchorCtx_) {
@@ -285,18 +286,21 @@ bool Anchor::extractFromPacket(const RangeHeader* rangeHeader,
   return false;
 }
 
-void Anchor::onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp) {
-  if (length < sizeof(AppHeader) + sizeof(RangeHeader)) {
+void Anchor::onReceive(uint8_t sourceId, const uint8_t* macPayload, size_t length, uint32_t rxTimestamp) {
+  // macPayload points to the start of the TDOA3 payload (after MAC header, which is 21 bytes)
+  // First byte should be the RangeHeader.type (0x30)
+  
+  if (length < sizeof(RangeHeader)) {
     return;
   }
-  auto appHeader = reinterpret_cast<const AppHeader*>(data);
-  if (appHeader->type != kPacketType) {
+
+  auto rangeHeader = reinterpret_cast<const RangeHeader*>(macPayload);
+  if (rangeHeader->type != kPacketType) {
     return;
   }
-  if (appHeader->destId != kBroadcastId && appHeader->destId != anchorId_) {
-    return;
-  }
-  uint8_t remoteAnchorId = appHeader->sourceId;
+
+  // Use the source ID extracted from MAC header
+  uint8_t remoteAnchorId = sourceId;
   anchorRxCount_[remoteAnchorId]++;
 
   AnchorContext* anchorCtx = getContext(remoteAnchorId);
@@ -311,11 +315,6 @@ void Anchor::onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp)
       }
       return;
     }
-  }
-
-  auto rangeHeader = reinterpret_cast<const RangeHeader*>(data + sizeof(AppHeader));
-  if (rangeHeader->type != kPacketType) {
-    return;
   }
 
   uint32_t remoteTx = rangeHeader->txTimeStamp;
@@ -334,8 +333,8 @@ void Anchor::onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp)
 
     uint32_t remoteRx = 0;
     uint8_t remoteRxSeqNr = 0;
-    const uint8_t* payloadStart = data + sizeof(AppHeader) + sizeof(RangeHeader);
-    size_t payloadLength = length - sizeof(AppHeader) - sizeof(RangeHeader);
+    const uint8_t* payloadStart = macPayload + sizeof(RangeHeader);
+    size_t payloadLength = length - sizeof(RangeHeader);
     if (extractFromPacket(rangeHeader, payloadStart, payloadLength, &remoteRx, &remoteRxSeqNr)) {
       uint16_t distance = calculateDistance(anchorCtx, remoteRxSeqNr, remoteTx, remoteRx, rxTimestamp);
       if (distance > antennaDelayTicks_) {
@@ -351,17 +350,11 @@ void Anchor::onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp)
       }
     }
   } else {
-    anchorCtx->isDataGoodForTransmission = (anchorCtx->clockCorrectionBucket > 0);
+    anchorCtx->isDataGoodForTransmission = false;
     if (kAnchorDebug && prevGood) {
       Serial.printf("TDOA3 data bad id=%u cc=%.9f bucket=%u\n",
                     remoteAnchorId,
                     anchorCtx->clockCorrection,
-                    anchorCtx->clockCorrectionBucket);
-    }
-    if (kAnchorDebug && !prevGood) {
-      Serial.printf("TDOA3 cc rejected id=%u cc=%.9f bucket=%u\n",
-                    remoteAnchorId,
-                    clockCorrection,
                     anchorCtx->clockCorrectionBucket);
     }
   }
@@ -371,19 +364,26 @@ void Anchor::onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp)
   anchorCtx->txTimeStamp = remoteTx;
 }
 
-size_t Anchor::buildTxFrame(uint8_t* buffer, size_t bufferSize) const {
+size_t Anchor::buildTxFrame(uint8_t* buffer, size_t bufferSize) {
   static uint32_t lastTxListDebugMs = 0;
-  const size_t headerSize = sizeof(AppHeader) + sizeof(RangeHeader);
+  
+  // Layout: MAC header (21) + RangeHeader (5) + RemoteData (6-8 each) + LPP optional (14+)
+  const size_t macHeaderSize = sizeof(MAC80215Header);
+  const size_t rangeHeaderSize = sizeof(RangeHeader);
+  const size_t headerSize = macHeaderSize + rangeHeaderSize;
+  
   if (bufferSize < headerSize) {
     return 0;
   }
 
-  auto appHeader = reinterpret_cast<AppHeader*>(buffer);
-  appHeader->sourceId = anchorId_;
-  appHeader->destId = kBroadcastId;
-  appHeader->type = kPacketType;
+  // Construct MAC header
+  MAC80215Header* macHeader = constructMACFrame(buffer, bufferSize, macSeqNr_, 0);
+  if (!macHeader) {
+    return 0;
+  }
 
-  auto rangeHeader = reinterpret_cast<RangeHeader*>(buffer + sizeof(AppHeader));
+  // Construct range header
+  auto rangeHeader = reinterpret_cast<RangeHeader*>(buffer + macHeaderSize);
   rangeHeader->type = kPacketType;
   rangeHeader->seq = seqNr_;
   rangeHeader->txTimeStamp = txTime_;
@@ -429,13 +429,16 @@ size_t Anchor::buildTxFrame(uint8_t* buffer, size_t bufferSize) const {
     includedCount++;
   }
 
+  // Add LPP position block if enabled
+  // Format: [0xF0] [0x01] [x:float] [y:float] [z:float] = 14 bytes
   if (positionEnabled_) {
-    const size_t needed = 1 + sizeof(position_);
-    if (remaining >= needed) {
-      ptr[0] = kPositionBlockType;
-      memcpy(ptr + 1, position_, sizeof(position_));
-      ptr += needed;
-      remaining -= needed;
+    const size_t lppNeeded = 1 + 1 + 3 * sizeof(float);  // 14 bytes
+    if (remaining >= lppNeeded) {
+      ptr[0] = kLppShortType;      // 0xF0
+      ptr[1] = kLppAnchorPosition; // 0x01
+      memcpy(ptr + 2, position_, 3 * sizeof(float));
+      ptr += lppNeeded;
+      remaining -= lppNeeded;
     } else if (kAnchorDebug) {
       Serial.println("TDOA3 pos skipped: no space");
     }
@@ -453,9 +456,53 @@ size_t Anchor::buildTxFrame(uint8_t* buffer, size_t bufferSize) const {
   return static_cast<size_t>(ptr - buffer);
 }
 
-void Anchor::markTransmit(uint32_t txTimestamp) {
+void Anchor::markTransmit(uint32_t txTimestamp, uint16_t macSeq) {
   txTime_ = txTimestamp;
   seqNr_ = static_cast<uint8_t>((seqNr_ + 1) & 0x7F);
+  macSeqNr_ = macSeq;
+}
+
+uint16_t Anchor::makeFcf() {
+  // Frame Control Field for MAC 802.15.4
+  // bits 0-2:   type = 1 (data frame)
+  // bit 3:       security = 0
+  // bit 4:       frame pending = 0
+  // bit 5:       ack request = 0
+  // bit 6:       intra-PAN = 1
+  // bits 7-9:    reserved = 0
+  // bits 10-11:  dest addr mode = 3 (64-bit)
+  // bits 12-13:  version = 1
+  // bits 14-15:  src addr mode = 3 (64-bit)
+  
+  uint16_t fcf = 0;
+  fcf |= 0x01;           // type = data frame
+  fcf |= (1 << 6);       // intra-PAN
+  fcf |= (3 << 10);      // dest addr mode = 64-bit
+  fcf |= (1 << 12);      // version = 1
+  fcf |= (3 << 14);      // src addr mode = 64-bit
+  return fcf;
+}
+
+MAC80215Header* Anchor::constructMACFrame(uint8_t* buffer, size_t bufferSize, 
+                                           uint16_t macSeq, uint16_t payloadSize) {
+  if (bufferSize < sizeof(MAC80215Header)) {
+    return nullptr;
+  }
+  
+  auto macHeader = reinterpret_cast<MAC80215Header*>(buffer);
+  macHeader->fcf = makeFcf();
+  macHeader->seq = macSeq & 0xFF;
+  macHeader->pan = kNetworkId;
+  
+  // Destination address: 0x00...0x00 | 0xFF (broadcast)
+  memset(macHeader->destAddr, 0, 8);
+  macHeader->destAddr[0] = kBroadcastId;
+  
+  // Source address: 0x00...0x00 | anchorId
+  memset(macHeader->srcAddr, 0, 8);
+  macHeader->srcAddr[0] = anchorId_;
+  
+  return macHeader;
 }
 
 uint32_t Anchor::nextTxDelayMs() {
@@ -482,6 +529,17 @@ void Anchor::tick(uint32_t nowMs) {
     updateAnchorLists(nowMs);
     nextAnchorListUpdateMs_ = nowMs + kAnchorListUpdateMs;
   }
+}
+
+uint8_t Anchor::validAnchorCount() const {
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < remoteTxIdCount_; i++) {
+    const AnchorContext* anchorCtx = getContext(remoteTxId_[i]);
+    if (anchorCtx && anchorCtx->isDataGoodForTransmission) {
+      count++;
+    }
+  }
+  return count;
 }
 
 }  // namespace tdoa3

@@ -4,26 +4,39 @@
 
 namespace tdoa3 {
 
-constexpr uint8_t kPacketType = 0x30;
+// Packet type constants
+constexpr uint8_t kPacketType = 0x30;          // TDOA3 packet
+constexpr uint8_t kLppShortType = 0xF0;        // LPP short packet
+constexpr uint8_t kLppAnchorPosition = 0x01;   // LPP anchor position ID
+
+// Network constants
 constexpr uint8_t kBroadcastId = 0xFF;
+constexpr uint16_t kNetworkId = 0xBCCF;  // Bitcraze default PAN
+
+// Capability constants
 constexpr uint8_t kAnchorStorageCount = 16;
 constexpr uint8_t kRemoteTxMaxCount = 8;
 constexpr size_t kIdCount = 256;
 constexpr uint8_t kIdWithoutContext = 0xFF;
 constexpr uint8_t kSeqHasDistanceMask = 0x80;
-constexpr uint8_t kPositionBlockType = 0xA1;
 
-struct AppHeader {
-  uint8_t sourceId;
-  uint8_t destId;
-  uint8_t type;
+// MAC 802.15.4 header (21 bytes total)
+struct MAC80215Header {
+  // Frame control: 2 bytes
+  // Format: type(3) | security(1) | pending(1) | ack(1) | ipan(1) | rsvd(3) | destMode(2) | version(2) | srcMode(2)
+  uint16_t fcf;
+  uint8_t seq;
+  uint16_t pan;           // 0xBCCF (Bitcraze)
+  uint8_t destAddr[8];    // 0x00...0x00 + destId
+  uint8_t srcAddr[8];     // 0x00...0x00 + srcId (set at runtime)
 } __attribute__((packed));
 
+// TDOA3 range packet header (5 bytes)
 struct RangeHeader {
-  uint8_t type;
-  uint8_t seq;
-  uint32_t txTimeStamp;
-  uint8_t remoteCount;
+  uint8_t type;           // 0x30 (PACKET_TYPE_TDOA3)
+  uint8_t seq;            // 0-127 (bit 7 unused in header)
+  uint32_t txTimeStamp;   // Transmission time
+  uint8_t remoteCount;    // Number of remote anchor data blocks
 } __attribute__((packed));
 
 struct RemoteAnchorDataFull {
@@ -66,10 +79,10 @@ class Anchor {
  public:
   void begin(const Config& config);
 
-  void onReceive(const uint8_t* data, size_t length, uint32_t rxTimestamp);
-  size_t buildTxFrame(uint8_t* buffer, size_t bufferSize) const;
+  void onReceive(uint8_t sourceId, const uint8_t* macPayload, size_t length, uint32_t rxTimestamp);
+  size_t buildTxFrame(uint8_t* buffer, size_t bufferSize);
 
-  void markTransmit(uint32_t txTimestamp);
+  void markTransmit(uint32_t txTimestamp, uint16_t macSeq);
   uint32_t nextTxDelayMs();
   void scheduleNextTx(uint32_t nowMs);
   bool shouldTransmit(uint32_t nowMs) const;
@@ -78,6 +91,10 @@ class Anchor {
   uint8_t anchorId() const { return anchorId_; }
   uint8_t seqNr() const { return seqNr_; }
   uint32_t lastTxTime() const { return txTime_; }
+  uint8_t validAnchorCount() const;
+  
+  // Static helper for MAC FCF setup
+  static uint16_t makeFcf();
 
  private:
   AnchorContext* getContext(uint8_t anchorId);
@@ -103,6 +120,10 @@ class Anchor {
                          size_t payloadLength,
                          uint32_t* remoteRx,
                          uint8_t* remoteRxSeqNr) const;
+  
+  // MAC-related helpers
+  MAC80215Header* constructMACFrame(uint8_t* buffer, size_t bufferSize, 
+                                     uint16_t macSeq, uint16_t payloadSize);
 
   float systemTxFreq_ = 200.0f;
   uint8_t anchorId_ = 1;
@@ -120,6 +141,7 @@ class Anchor {
   uint8_t anchorRxCount_[kIdCount] = {};
   bool positionEnabled_ = false;
   float position_[3] = {0.0f, 0.0f, 0.0f};
+  uint16_t macSeqNr_ = 0;  // MAC layer sequence number
 };
 
 }  // namespace tdoa3
